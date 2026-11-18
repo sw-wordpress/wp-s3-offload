@@ -45,6 +45,10 @@ class ResultPaginator implements \Iterator
         $this->operation = $operation;
         $this->args = $args;
         $this->config = $config;
+        MetricsBuilder::appendMetricsCaptureMiddleware(
+            $this->client->getHandlerList(),
+            MetricsBuilder::PAGINATOR
+        );
     }
 
     /**
@@ -70,10 +74,21 @@ class ResultPaginator implements \Iterator
     {
         return Promise\Coroutine::of(function () use ($handleResult) {
             $nextToken = null;
+            $tokenKey = $this->config['output_token'] === 'nextForwardToken'
+                ? $this->config['input_token']
+                : null;
             do {
                 $command = $this->createNextCommand($this->args, $nextToken);
                 $result = (yield $this->client->executeAsync($command));
                 $nextToken = $this->determineNextToken($result);
+
+                // A repeated forward token marks the end of the stream.
+                if ($tokenKey !== null && isset($nextToken[$tokenKey])
+                    && $nextToken[$tokenKey] === $command[$tokenKey]
+                ) {
+                    $nextToken = null;
+                }
+
                 $retVal = $handleResult($result);
                 if ($retVal !== null) {
                     yield Promise\Create::promiseFor($retVal);
@@ -107,18 +122,27 @@ class ResultPaginator implements \Iterator
         return $this->valid() ? $this->result : false;
     }
 
+    /**
+     * @return mixed
+     */
     #[\ReturnTypeWillChange]
     public function key()
     {
         return $this->valid() ? $this->requestCount - 1 : null;
     }
 
+    /**
+     * @return void
+     */
     #[\ReturnTypeWillChange]
     public function next()
     {
         $this->result = null;
     }
 
+    /**
+     * @return bool
+     */
     #[\ReturnTypeWillChange]
     public function valid()
     {
@@ -154,6 +178,9 @@ class ResultPaginator implements \Iterator
         return false;
     }
 
+    /**
+     * @return void
+     */
     #[\ReturnTypeWillChange]
     public function rewind()
     {
@@ -162,7 +189,7 @@ class ResultPaginator implements \Iterator
         $this->result = null;
     }
 
-    private function createNextCommand(array $args, array $nextToken = null)
+    private function createNextCommand(array $args, ?array $nextToken = null)
     {
         return $this->client->getCommand($this->operation, array_merge($args, ($nextToken ?: [])));
     }

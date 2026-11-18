@@ -1,0 +1,6 @@
+.phpcs.cache
+.phpstan.cache/
+*.log
+.env
+/coverage/
+/.scannerwork/

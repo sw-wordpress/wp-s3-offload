@@ -1,0 +1,17 @@
+<?php
+
+/**
+ * Stubs for optional third-party plugin symbols that are only referenced
+ * behind runtime guards (class_exists / function_exists / is_plugin_active).
+ * They are never shipped or loaded by this plugin.
+ */
+
+class RevSliderFront
+{
+    public const TABLE_SLIDES = 'revslider_slides';
+}
+
+function Updraft_Smush_Manager(): object
+{
+    return new stdClass();
+}

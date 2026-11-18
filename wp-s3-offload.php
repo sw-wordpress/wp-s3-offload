@@ -1,11 +1,15 @@
 <?php
 /**
+ * WP Media S3 offloading plugin bootstrap.
+ *
+ * @package WPS3_S3_Offload
+ *
  * @wordpress-plugin
  * Plugin Name:       WP Media S3 offloading
  * Update URI:        https://github.com/sw-wordpress/wp-s3-offload
  * Plugin URI:        https://github.com/sw-wordpress/wp-s3-offload
  * Version:           1.2.5
- * Description:		  Upload and manage files on S3 Storage to Offload media
+ * Description:       Upload and manage files on S3 Storage to Offload media
  * Author:            Stefan Warnat
  * Requires at least: 6.4
  * Requires PHP:      8.2
@@ -20,7 +24,7 @@ use WPS3\S3\Offload\Loader;
 define( 'WPS3_PLUGIN_BASE_DIR', plugin_dir_path( __FILE__ ) );
 define( 'WPS3_PLUGIN_BASE_URL', plugin_dir_url( __FILE__ ) );
 
-require_once(WPS3_PLUGIN_BASE_DIR . 'includes' . DIRECTORY_SEPARATOR . 'loader.php');
+require_once WPS3_PLUGIN_BASE_DIR . 'includes' . DIRECTORY_SEPARATOR . 'loader.php';
 
-$loader = new Loader();
-$loader->run();
+$wps3_loader = new Loader();
+$wps3_loader->run();

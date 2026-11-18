@@ -1,0 +1,25 @@
+parameters:
+    level: 8
+    paths:
+        - includes
+        - templates
+        - wp-s3-offload.php
+    stubFiles:
+        - tests/phpstan/third-party.stub
+    bootstrapFiles:
+        - tests/phpstan/bootstrap.php
+    dynamicConstantNames:
+        - WPS3_KEY
+        - WPS3_SECRET
+        - WPS3_BUCKET
+        - WPS3_REGION
+        - WPS3_ENDPOINT
+        - WPS3_URL_PREFIX
+        - WPS3_FOLDER
+        - WPS3_PATHSTYLE
+        - WPS3_PROVIDER
+        - WPS3_PLUGIN_BASE_DIR
+        - WPS3_PLUGIN_BASE_URL
+        - WP_REDIS_HOST
+        - WP_REDIS_PREFIX
+    tmpDir: .phpstan.cache
