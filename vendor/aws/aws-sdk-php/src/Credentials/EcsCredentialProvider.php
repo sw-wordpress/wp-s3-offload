@@ -1,9 +1,12 @@
 <?php
 namespace Aws\Credentials;
 
+use Aws\Arn\Arn;
 use Aws\Exception\CredentialsException;
+use Aws\Handler\HttpHandlerError;
 use GuzzleHttp\Exception\GuzzleException;
 use GuzzleHttp\Psr7\Request;
+use GuzzleHttp\Promise;
 use GuzzleHttp\Promise\PromiseInterface;
 use Psr\Http\Message\ResponseInterface;
 
@@ -21,6 +24,10 @@ class EcsCredentialProvider
     const ENV_TIMEOUT = 'AWS_METADATA_SERVICE_TIMEOUT';
     const EKS_SERVER_HOST_IPV4 = '169.254.170.23';
     const EKS_SERVER_HOST_IPV6 = 'fd00:ec2::23';
+    const ENV_RETRIES = 'AWS_METADATA_SERVICE_NUM_ATTEMPTS';
+
+    const DEFAULT_ENV_TIMEOUT = 1.0;
+    const DEFAULT_ENV_RETRIES = 3;
 
     /** @var callable */
     private $client;
@@ -28,23 +35,42 @@ class EcsCredentialProvider
     /** @var float|mixed */
     private $timeout;
 
+    /** @var int */
+    private $retries;
+
+    /** @var int */
+    private $attempts;
+
+    /** @var string[] */
+    private $retryableExceptions;
+
+    /** @var int[] */
+    private $retryableErrorCodes;
+
     /**
      *  The constructor accepts following options:
      *  - timeout: (optional) Connection timeout, in seconds, default 1.0
+     *  - retries: Optional number of retries to be attempted, default 3.
      *  - client: An EcsClient to make request from
+     *  - retryable_exceptions: Optional array of additional exception class
+     *    names that should be retried. Connection errors are always retried,
+     *    regardless of this option.
+     *  - retryable_error_codes: Optional array of HTTP status codes that
+     *    should be retried. Defaults to an empty array.
      *
      * @param array $config Configuration options
      */
     public function __construct(array $config = [])
     {
-        $timeout = getenv(self::ENV_TIMEOUT);
+        $timeout = $config['timeout'] ?? (getenv(self::ENV_TIMEOUT) ?: self::DEFAULT_ENV_TIMEOUT);
+        $this->timeout = is_string($timeout) && is_numeric($timeout) ? (float) $timeout : $timeout;
+        $this->retries = (int) isset($config['retries'])
+            ? $config['retries']
+            : ((int) getenv(self::ENV_RETRIES) ?: self::DEFAULT_ENV_RETRIES);
 
-        if (!$timeout) {
-            $timeout = $_SERVER[self::ENV_TIMEOUT] ?? ($config['timeout'] ?? 1.0);
-        }
-
-        $this->timeout = (float) $timeout;
         $this->client = $config['client'] ?? \Aws\default_http_handler();
+        $this->retryableExceptions = $config['retryable_exceptions'] ?? [];
+        $this->retryableErrorCodes = $config['retryable_error_codes'] ?? [];
     }
 
     /**
@@ -55,38 +81,74 @@ class EcsCredentialProvider
      */
     public function __invoke()
     {
-        $client = $this->client;
-        $uri = self::getEcsUri();
-
+        $this->attempts = 0;
+        $uri = $this->getEcsUri();
         if ($this->isCompatibleUri($uri)) {
-            $request = new Request('GET', $uri);
+            return Promise\Coroutine::of(function () {
+                $client = $this->client;
+                $request = new Request('GET', $this->getEcsUri());
+                $headers = $this->getHeadersForAuthToken();
+                $credentials = null;
+                while ($credentials === null) {
+                    $credentials = (yield $client(
+                        $request,
+                        [
+                            'timeout' => $this->timeout,
+                            'proxy' => '',
+                            'headers' => $headers,
+                        ]
+                    )->then(function (ResponseInterface $response) {
+                        $result = $this->decodeResult((string)$response->getBody());
+                        if (!isset($result['AccountId']) && isset($result['RoleArn'])) {
+                            try {
+                                $parsedArn = new Arn($result['RoleArn']);
+                                $result['AccountId'] = $parsedArn->getAccountId();
+                            } catch (\Exception $e) {
+                                // AccountId will be null
+                            }
+                        }
 
-            $headers = $this->getHeadersForAuthToken();
-            return $client(
-                $request,
-                [
-                    'timeout' => $this->timeout,
-                    'proxy' => '',
-                    'headers' => $headers
-                ]
-            )->then(function (ResponseInterface $response) {
-                $result = $this->decodeResult((string) $response->getBody());
-                return new Credentials(
-                    $result['AccessKeyId'],
-                    $result['SecretAccessKey'],
-                    $result['Token'],
-                    strtotime($result['Expiration'])
-                );
-            })->otherwise(function ($reason) {
-                $reason = is_array($reason) ? $reason['exception'] : $reason;
-                $msg = $reason->getMessage();
-                throw new CredentialsException(
-                    "Error retrieving credentials from container metadata ($msg)"
-                );
+                        return new Credentials(
+                            $result['AccessKeyId'],
+                            $result['SecretAccessKey'],
+                            $result['Token'],
+                            strtotime($result['Expiration']),
+                            $result['AccountId'] ?? null,
+                            CredentialSources::ECS
+                        );
+                    })->otherwise(function ($reason) {
+                        $connectionError = is_array($reason) && !empty($reason['connection_error']);
+                        $exception = is_array($reason) ? ($reason['exception'] ?? null) : $reason;
+                        $isRetryable = $connectionError
+                            || ($exception instanceof \Throwable && $this->isRetryable($exception));
+
+                        if ($isRetryable && ($this->attempts < $this->retries)) {
+                            sleep((int)pow(1.2, $this->attempts));
+                        } else {
+                            $msg = $exception instanceof \Throwable ? $exception->getMessage() : \Aws\describe_type($reason);
+                            throw new CredentialsException(
+                                sprintf('Error retrieving credentials from container metadata after attempt %d/%d (%s)', $this->attempts, $this->retries, $msg)
+                            );
+                        }
+                    }));
+                    $this->attempts++;
+                }
+
+                yield $credentials;
             });
         }
 
         throw new CredentialsException("Uri '{$uri}' contains an unsupported host.");
+    }
+
+    /**
+     * Returns the number of attempts that have been done.
+     *
+     * @return int
+     */
+    public function getAttempts(): int
+    {
+        return $this->attempts;
     }
 
     /**
@@ -97,13 +159,24 @@ class EcsCredentialProvider
     private function getEcsAuthToken()
     {
         if (!empty($path = getenv(self::ENV_AUTH_TOKEN_FILE))) {
-            if (is_readable($path)) {
-                return file_get_contents($path);
+            $token =  @file_get_contents($path);
+            if (false === $token) {
+                clearstatcache(true, dirname($path) . DIRECTORY_SEPARATOR . @readlink($path));
+                clearstatcache(true, dirname($path) . DIRECTORY_SEPARATOR . dirname(@readlink($path)));
+                clearstatcache(true, $path);
             }
 
-            throw new CredentialsException(
-                "Failed to read authorization token from '{$path}': no such file or directory."
-            );
+            if (!is_readable($path)) {
+                throw new CredentialsException("Failed to read authorization token from '{$path}': no such file or directory.");
+            }
+
+            $token = @file_get_contents($path);
+
+            if (empty($token)) {
+                throw new CredentialsException("Invalid authorization token read from `$path`. Token file is empty!");
+            }
+
+            return $token;
         }
 
         return getenv(self::ENV_AUTH_TOKEN);
@@ -158,8 +231,35 @@ class EcsCredentialProvider
             if (!empty($credFullUri))
                 return $credFullUri;
         }
-        
+
         return self::SERVER_URI . $credsUri;
+    }
+
+    /**
+     * Determines whether a failed request should be retried. Connection
+     * errors are always retried; the configured retryable_exceptions and
+     * retryable_error_codes are checked in addition to them.
+     */
+    private function isRetryable(\Throwable $exception): bool
+    {
+        if (HttpHandlerError::isConnectionError($exception)) {
+            return true;
+        }
+
+        foreach ($this->retryableExceptions as $exceptionClass) {
+            if ($exception instanceof $exceptionClass) {
+                return true;
+            }
+        }
+
+        $response = HttpHandlerError::getResponse($exception);
+
+        return $response !== null
+            && in_array(
+                $response->getStatusCode(),
+                $this->retryableErrorCodes,
+                true
+            );
     }
 
     private function decodeResult($response)
@@ -192,41 +292,12 @@ class EcsCredentialProvider
             if ($host !== $ecsHost
                 && $host !== $eksHost
                 && $host !== self::EKS_SERVER_HOST_IPV6
-                && !$this->isLoopbackAddress(gethostbyname($host))
+                && !CredentialsUtils::isLoopBackAddress(gethostbyname($host))
             ) {
                 return false;
             }
         }
 
         return true;
-    }
-
-    /**
-     * Determines whether or not a given host
-     * is a loopback address.
-     *
-     * @param $host
-     *
-     * @return bool
-     */
-    private function isLoopbackAddress($host)
-    {
-        if (!filter_var($host, FILTER_VALIDATE_IP)) {
-            return false;
-        }
-
-        if (filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
-            if ($host === '::1') {
-                return true;
-            }
-
-            return false;
-        }
-
-        $loopbackStart = ip2long('127.0.0.0');
-        $loopbackEnd = ip2long('127.255.255.255');
-        $ipLong = ip2long($host);
-
-        return ($ipLong >= $loopbackStart && $ipLong <= $loopbackEnd);
     }
 }

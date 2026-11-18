@@ -1,34 +1,31 @@
 (function($) {
     'use strict';
 
-    $('#test_connection').on('click', function(e) {
+    $('#test_connection').on('click', function() {
         $.ajax({
             type: 'POST',
             url: 'admin-post.php',
             data: {
-                action: 's3_test_connection'
+                action: 's3_test_connection',
+                nonce: wps3_ajax.nonce
             }
         }).then(function(response) {
-            if(response != "OK") {
-                alert(response)
+            if (response !== 'OK') {
+                alert(response);
             } else {
-                alert("Test successfully.")
+                alert('Test successfully.');
             }
+        });
+    });
 
-            
-        })
-
-    })
-
-    $('#start_batch_migration').on('click', function(e) {
+    $('#start_batch_migration').on('click', function() {
         const step = Math.round(100 / $('#migration_log').data('count'));
         let currentPercent = 0;
 
         function updateProgressBar() {
             $('#progress_bar_bar').css('width', currentPercent + '%');
-            $('#progress_bar_percent').text(currentPercent + ' %')
+            $('#progress_bar_percent').text(currentPercent + ' %');
         }
-
 
         function batchSync() {
             $.ajax({
@@ -36,17 +33,18 @@
                 url: 'admin-post.php',
                 dataType: 'json',
                 data: {
-                    action: 's3_sync_batch'
+                    action: 's3_sync_batch',
+                    nonce: wps3_ajax.nonce
                 }
             }).then(function(response) {
-                if(response.done.length > 0) {
-                    let html = '';
-                    for(const entry of response.done) {
-                        html += '<div><strong>#' + entry.id + ' - ' + entry.name + '</strong> done</div>';
+                if (response.done.length > 0) {
+                    for (const entry of response.done) {
+                        const line = $('<div></div>');
+                        $('<strong></strong>').text('#' + entry.id + ' - ' + entry.name).appendTo(line);
+                        line.append(' done');
+                        $('#migration_protocol').append(line);
                         currentPercent += step;
                     }
-
-                    $('#migration_protocol').append(html);                    
 
                     updateProgressBar();
                     setTimeout(batchSync, 500);
@@ -54,8 +52,7 @@
                     currentPercent = 100;
                     updateProgressBar();
                 }
-                
-            })
+            });
         }
 
         updateProgressBar();
@@ -68,10 +65,11 @@
         e.preventDefault();
         e.stopPropagation();
 
-        var url = $(e.currentTarget).data('url');
+        const button = $(e.currentTarget);
+        const url = button.data('url');
 
         jQuery.get(url, function() {
-            $(e.currentTarget).html('<span class="dashicons dashicons-saved"></span>');
+            button.html('<span class="dashicons dashicons-saved"></span>');
         });
     });
 })(jQuery);
